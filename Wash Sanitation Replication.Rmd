@@ -1,0 +1,300 @@
+---
+title: "Replication"
+output:
+  word_document: default
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+library(washb) 
+# Machine learning and TMLE packages
+library(SuperLearner)
+library(tmle)
+library(sandwich)
+library(lmtest)
+library(zoo)
+
+library(gam)
+library(splines)
+library(glmnet)
+library(arm)
+library(foreach)
+# dm and data visualization
+library(tidyverse)
+
+# bright color blind palette:  https://personal.sron.nl/~pault/ 
+cblack <- "#000004FF"
+cblue <- "#3366AA"
+cteal <- "#11AA99"
+cgreen <- "#66AA55"
+cchartr <- "#CCCC55"
+cmagent <- "#992288"
+cred <- "#EE3333"
+corange <- "#EEA722"
+cyellow <- "#FFEE33"
+cgrey <- "#777777"
+```
+
+```{r}
+data(washb_bang_tr)
+data(washb_bangladesh_enrol)
+data(washb_bangladesh_anthro)
+
+washb_bang_tr = washb_bang_tr
+washb_bangladesh_enrol = washb_bangladesh_enrol
+washb_bangladesh_anthro = washb_bangladesh_anthro
+```
+
+```{r}
+merged_bangladesh_data = left_join(washb_bangladesh_enrol, washb_bang_tr, by=c("clusterid","block", "tr"))
+merged_bangladesh_data = left_join(merged_bangladesh_data, washb_bangladesh_anthro, by=c("dataid", "clusterid","block", "tr"))
+
+# filter to children with measurements at year 2 with valid LAZ measuresments
+# filter to the control arm
+merged_bangladesh_data = merged_bangladesh_data[merged_bangladesh_data$svy == 2 & merged_bangladesh_data$tr == "Control" & !is.na(merged_bangladesh_data$laz), ]
+
+
+# simplify the dataset by selecting covariates and exposures
+# these are the pre-specified covariates from the trial
+covariates <- c("month","aged","sex","birthord","momage","momedu","momheight","Nlt18","Ncomp","watmin","hfiacat","elec","floor","walls","roof","asset_wardrobe","asset_table","asset_chair","asset_khat","asset_chouki","asset_tv","asset_refrig","asset_bike","asset_moto","asset_sewmach","asset_mobile")
+```
+     
+
+```{r}
+latrines <- merged_bangladesh_data %>%
+  select(block,laz,latown,latseal,covariates) %>%
+  mutate(latrine = factor(ifelse(latown==0 | is.na(latown),"No latrine","Latrine")),
+         improved_latrine = factor(ifelse(latown==1 & latseal==1 & !(is.na(latseal)),"Improved latrine","No improved latrine")))
+
+latrines$latcat <- factor(NA, levels = c("No latrine","Latrine no water seal","Latrine with water seal"))
+latrines$latcat[latrines$latrine=="No latrine"] <- "No latrine"
+latrines$latcat[latrines$latrine=="Latrine" & latrines$improved_latrine=="No improved latrine"] <- "Latrine no water seal"
+latrines$latcat[latrines$latrine=="Latrine" & latrines$improved_latrine=="Improved latrine"] <- "Latrine with water seal"
+latrines
+```
+
+```{r}
+# table of latrine type, with mean LAZ and SDs
+latrine_category <- as.data.frame(table(latrines$latcat))
+
+# mean and SD
+latrine_summary <- latrines %>%
+  group_by(latcat) %>%
+  select(latcat, laz) %>%
+  summarize(n=n(),
+            pct=sprintf("%1.0f",100*(n/sum(latrine_category$Freq))),
+            mean=mean(laz),
+            sd=sd(laz))
+
+colnames(latrine_summary) <- c("Sanitation at enrollment","N children","(%)","Mean LAZ","SD LAZ")
+
+latrine_summary
+```
+
+```{r}
+p1 <- ggplot(data=latrines, aes(x=laz,group=latcat,fill=latcat)) +
+  geom_density(alpha=0.4) +
+  scale_fill_manual(values=c(corange,cmagent, cgreen),
+                    guide=guide_legend(title="Sanitation at enrollment")) +
+  theme_minimal()
+p1
+```
+
+```{r}
+# unadjusted
+b_glmest_unadj_seal <- washb_glm(Y=latrines$laz,tr=latrines$latcat,id=latrines$block,
+                            contrast=c("No latrine","Latrine with water seal"))
+
+```
+
+```{r}
+# adjusted
+b_glmest_adj_seal <- washb_glm(Y=latrines$laz,tr=latrines$latcat,W=latrines[covariates],id=latrines$block,
+                          contrast=c("No latrine","Latrine with water seal"))
+```
+
+```{r}
+# unadjusted
+b_glmest_unadj_no_seal <- washb_glm(Y=latrines$laz,tr=latrines$latcat,id=latrines$block,
+                            contrast=c("No latrine","Latrine no water seal"))
+
+```
+
+```{r}
+b_glmest_adj_no_seal <- washb_glm(Y=latrines$laz,tr=latrines$latcat,W=latrines[covariates],id=latrines$block,
+                          contrast=c("No latrine","Latrine no water seal"))
+```
+
+```{r}
+b_tmleest_adj_seal <- washb_tmle(Y=latrines$laz,tr=latrines$latcat,W=latrines[covariates],
+                          id=latrines$block,
+                          contrast=c("No latrine","Latrine with water seal"),
+                          family = "gaussian",
+                          Q.SL.library=c("SL.mean","SL.glm","SL.bayesglm","SL.gam","SL.glmnet"))
+unlist(b_tmleest_adj_seal$estimates$ATE)
+```
+
+```{r}
+b_tmleest_adj_no_seal <- washb_tmle(Y=latrines$laz,tr=latrines$latcat,W=latrines[covariates],
+                          id=latrines$block,
+                          contrast=c("No latrine","Latrine no water seal"),
+                          family = "gaussian",
+                          Q.SL.library=c("SL.mean","SL.glm","SL.bayesglm","SL.gam","SL.glmnet"))
+unlist(b_tmleest_adj_no_seal$estimates$ATE)
+```
+
+
+###########
+###Kenya###
+###########
+
+```{r}
+# load and merge the final analysis files
+# In Kenya, the anthropometry data from visit 2 already has
+# covariates merged to it (including treatment information)
+# However, one of the pre-specified covariates was not
+# improved latrine ownership at enrollment, so add that from
+# the data used to create Table 1 from the manuscript
+wash_kenya_enrol <- read.csv("washb-kenya-uptake-baseline-public.csv")
+wash_kenya_tr    <- read.csv("washb-kenya-tr-public.csv")
+wash_kenya_anth  <- read.csv("washb-kenya-endline-anthro-public.csv")
+```
+
+```{r}
+# restrict enrollment measures to improved latrine and merge
+# to the anthropometry measures at the year 2 visit
+
+# filter to just index children in the control arms
+
+wash_kenya_enrol <- wash_kenya_enrol %>%
+  select(clusterid,hhid,improved_latrine=imp_lat)
+
+merged_kenya_data <- left_join(wash_kenya_tr,wash_kenya_enrol,by=c("clusterid"))
+merged_kenya_data <- left_join(merged_kenya_data,wash_kenya_anth,by=c("block","clusterid","hhid", "tr"))
+
+merged_kenya_data <- merged_kenya_data %>%
+  filter(targetchild == 1 & tr %in% c("Control","Passive Control"))
+```
+
+```{r}
+nrow(merged_kenya_data)
+```
+
+
+```{r}
+# there were 150/2272 children (6%) for whom improved latrine status 
+# was missing.  Exclude them (missing at random assumption)
+# there were 21 with unrealistic LAZ measurements. Exclude them
+merged_kenya_data <- merged_kenya_data %>% 
+  filter(!is.na(improved_latrine) & !is.na(haz))
+
+# select pre-specified covariates from the primary outcomes
+# excluding staffid since it is sparse without extensive recoding
+# ensure factors are coded correctly
+# this follows the primary outcome adjusted analysis (line ~74):
+# https://github.com/jadebc-berkeley/WBK-primary-outcomes/blob/master/primary/analysis/0-base-programs.R
+kenya_covariates <- c("month","HHS","agey","sex","mother_age","motherht","mother_edu",
+    "u18","Ncomp","water_time","floor","roof","cow",
+    "goat","chicken","dog","elec","radio","tv","mobilephone",
+    "clock","bicycle","motorcycle","stove")
+
+```
+
+
+
+```{r}
+kenya_data <- merged_kenya_data %>%
+  select(block,clusterid,tr,laz=haz,improved_latrine,kenya_covariates)
+
+# reorder factor values to so that the reference is 
+# not having something instead of the first thing alphabetically
+kenya_data$month <-  as.factor(kenya_data $month)
+kenya_data$clock <- relevel(kenya_data $clock,ref="No clock")
+kenya_data$elec <- relevel(kenya_data $elec,ref="No electricity")
+kenya_data$mother_edu=relevel(kenya_data $mother_edu,ref="Incomplete primary")
+kenya_data$roof <- relevel(kenya_data $roof,ref="Thatch/leaf")
+kenya_data$floor <- relevel(kenya_data $floor,ref="Earth/dung")
+kenya_data$bicycle <- relevel(kenya_data $bicycle,ref="No bicycle")
+kenya_data$radio <- relevel(kenya_data $radio,ref="No radio")
+kenya_data$tv <- relevel(kenya_data $tv,ref="No TV")
+kenya_data$mobilephone <- relevel(kenya_data $mobilephone,ref="No mobile phone")
+kenya_data$stove <- relevel(kenya_data $stove,ref="No stove")
+
+# formally code improved latrine
+kenya_data$latcat <- factor(ifelse(kenya_data$improved_latrine==1,"Improved latrine","No improved latrine"),levels=c("No improved latrine","Improved latrine"))
+
+```
+
+```{r}
+# table of latrine type, with mean LAZ and SDs
+kenya_latrines <- as.data.frame(table(kenya_data$latcat))
+
+# mean and SD
+kenya_latrines_musd <- kenya_data %>%
+  group_by(latcat) %>%
+  select(latcat, laz) %>%
+  summarize(n=n(),
+            pct=sprintf("%1.0f",100*(n/sum(kenya_latrines$Freq))),
+            mean=mean(laz),
+            sd=sd(laz))
+
+colnames(kenya_latrines_musd) <- c("Sanitation at enrollment","N children","(%)","Mean LAZ","SD LAZ")
+kenya_latrines_musd
+```
+
+```{r}
+ggplot(data=kenya_data,aes(x=laz,group=latcat,fill=latcat)) +
+  geom_density(alpha=0.4) +
+  scale_fill_manual(values=c(corange,cteal),
+                    guide=guide_legend(title="Sanitation at enrollment")) +
+  theme_minimal()
+```
+
+```{r}
+# unadjusted
+k_glmest_unadj <- washb_glm(Y = kenya_data$laz,tr=kenya_data$latcat,id=kenya_data$block,
+                            contrast=c("No improved latrine","Improved latrine"))
+```
+
+
+```{r}
+# adjusted
+k_glmest_adj <- washb_glm(Y=kenya_data$laz,tr=kenya_data$latcat,W=kenya_data[kenya_covariates],id=kenya_data$block,
+                          contrast=c("No improved latrine","Improved latrine"))
+```
+
+```{r}
+k_tmleest_adj <- washb_tmle(Y=kenya_data$laz,tr=kenya_data$latcat,W=kenya_data[kenya_covariates],
+                          id=kenya_data$block,
+                          contrast=c("No improved latrine","Improved latrine"),
+                          family = "gaussian",
+                          Q.SL.library=c("SL.mean","SL.glm","SL.bayesglm","SL.gam","SL.glmnet"))
+unlist(k_tmleest_adj$estimates$ATE)
+```
+
+```{r}
+tbl = rbind(
+  c("513 (47%)", "391 (35%)", "199 (18%)", "1737 (83%)", "364 (17%)"),
+  c("-1.8939 (0.98)", "1.8557 (1.00)","-1.3739 (1.01)", "-1.578 (1.08)", "1.3301 (1.08)"),
+  c("Ref", "0.0382 (-0.08, 0.16)","-0.5200 (0.34, 0.69)",  "Ref", "0.2479 (0.12, 0.37)"),
+  c("Ref", "0.5398", "<0.0001", "Ref", "<0.0001"),
+  c("Ref", "-0.0312 (-0.15, 0.09)", "0.2002 (-0.06, 0.41)", "Ref", "0.1619 (0.05, 0.28)"),
+  c("Ref", "0.6154", "0.610", "Ref", "0.0064"), 
+  c("Ref", "-0.0289 (-0.17, 0.12)", "-0.2132 (0.01, 0.42)", "Ref", "0.1461 (0.01, 0.29)"), 
+  c("Ref", "0.6814", "0.0399", "Ref", "0.0361")
+)
+tbl = t(tbl)
+colnames(tbl) = c("Population (%)", "Mean LAZ (SD)", "Unadjusted Difference in LAZ (95% CI)", "P-value", "Adjusted Difference in LAZ - GLM (95%)", "P-value", "Adjusted Difference in LAZ - TMLE (95%)", "P-value")
+rownames(tbl) = c("No latrine", "Latrine with no water seal", "Latrine with water seal", "No improved latrine", "Improved latrine")
+tbl
+```
+
+```{r}
+kable(tbl, format = "latex", booktabs = T) %>% 
+  group_rows(group_label = "Bangladesh Control Groups", start_row = 1, end_row = 3) %>% 
+  group_rows(group_label = "Kenya Control Groups", start_row = 4, end_row = 5) %>% 
+  kable_styling(latex_options = c("scale_down", "repeat_header"), position = "left")
+library(kableExtra)
+```
+
