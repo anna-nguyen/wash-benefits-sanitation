@@ -20,7 +20,7 @@ find the unadjusted and adjusted differences in LAZ between households that had 
 have improved latrines at baseline.
 
 ### Results 
-The mean LAX measurements were still low across the board after stratifying data for latrine status at enrollment. There were
+The mean LAZ measurements were still low across the board after stratifying data for latrine status at enrollment. There were
 significantly significant LAZ differences in households with improved latrines at baseline relative to households that did not have improved
 latrines.
 
